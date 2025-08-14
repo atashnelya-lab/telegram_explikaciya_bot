@@ -1,6 +1,6 @@
 
 services:
-  - type: worker
+  - type: web
     name: telegram-explikaciya-bot
     env: python
     plan: free
@@ -8,4 +8,4 @@ services:
     startCommand: python bot.py
     envVars:
       - key: BOT_TOKEN
-        sync: false  # set in Render dashboard
+        sync: false
