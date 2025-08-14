@@ -4,7 +4,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.types import Message
 from aiogram.filters import Command
 
-TOKEN = os.getenv("BOT_TOKEN")  # <- set on the hosting platform (ENV VAR)
+TOKEN = "8022401482:AAFsdK8f1TF6AkZlX7MLtCvel3RtjpMtIv8"
 if not TOKEN:
     raise RuntimeError("Please set BOT_TOKEN environment variable")
 
