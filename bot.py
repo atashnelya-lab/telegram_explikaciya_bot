@@ -1,4 +1,4 @@
-# bot.py — aiogram v3, polling, одна корутина main() для server.py
+# bot.py — aiogram v3, безопасный polling (снимаем вебхук перед стартом)
 
 import os
 import json
@@ -6,28 +6,31 @@ import logging
 from pathlib import Path
 from typing import Dict, List
 
-from aiogram import Bot, Dispatcher, Router, F
+from aiogram import Bot, Dispatcher, Router
 from aiogram.types import Message
 from aiogram.filters import Command
 
-# --------- ЛОГИ ---------
+# ---------- ЛОГИ ----------
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("telegram_explikaciya_bot")
 
-# --------- НАСТРОЙКИ ---------
+# ---------- НАСТРОЙКИ ----------
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("Environment variable BOT_TOKEN is not set")
 
+# Файл с маппингом код <-> наименование
 DATA_FILE = Path(__file__).parent / "explikaciya_mapping.json"
 
-# Словари, которые загрузим из json
+# Данные (загружаются из JSON)
 CODE2NAME: Dict[str, str] = {}
 NAME2CODES: Dict[str, List[str]] = {}
 
-# --------- ЗАГРУЗКА ДАННЫХ ---------
+# ---------- ЗАГРУЗКА ДАННЫХ ----------
 def load_mapping() -> None:
+    """Подгрузить словари из JSON и нормализовать ключи."""
     global CODE2NAME, NAME2CODES
+
     if not DATA_FILE.exists():
         log.error("Файл с данными не найден: %s", DATA_FILE)
         CODE2NAME, NAME2CODES = {}, {}
@@ -36,11 +39,11 @@ def load_mapping() -> None:
     with DATA_FILE.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
-    # ожидаем структуру {"code_to_name": {...}, "name_to_codes": {...}}
+    # ожидаем {"code_to_name": {...}, "name_to_codes": {...}}
     CODE2NAME = data.get("code_to_name", {}) or {}
     NAME2CODES = data.get("name_to_codes", {}) or {}
 
-    # Нормализация ключей для устойчивого поиска
+    # нормализация
     CODE2NAME = {str(k).strip().upper(): str(v) for k, v in CODE2NAME.items()}
     NAME2CODES = {
         str(name).strip().lower(): [str(c).strip().upper() for c in codes]
@@ -50,7 +53,7 @@ def load_mapping() -> None:
     log.info("Загружено: %d кодов, %d наименований", len(CODE2NAME), len(NAME2CODES))
 
 
-# --------- ROUTER ---------
+# ---------- ROUTER ----------
 router = Router()
 
 
@@ -69,13 +72,12 @@ async def cmd_start(message: Message) -> None:
 
 @router.message(Command("bycode"))
 async def cmd_bycode(message: Message) -> None:
-    # аргументы команды: всё, что после /bycode
-    arg = (message.text or "").split(maxsplit=1)
-    if len(arg) < 2:
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
         await message.answer("Укажи код: например, `/bycode A0UJA`", parse_mode="Markdown")
         return
 
-    code = arg[1].strip().upper()
+    code = parts[1].strip().upper()
     name = CODE2NAME.get(code)
     if name:
         await message.answer(f"Код: **{code}**\nНаименование: {name}", parse_mode="Markdown")
@@ -85,34 +87,40 @@ async def cmd_bycode(message: Message) -> None:
 
 @router.message(Command("byname"))
 async def cmd_byname(message: Message) -> None:
-    arg = (message.text or "").split(maxsplit=1)
-    if len(arg) < 2:
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
         await message.answer(
             "Укажи наименование: например, `/byname Реакторное здание`",
             parse_mode="Markdown",
         )
         return
 
-    name_query = arg[1].strip().lower()
+    name_query = parts[1].strip().lower()
     codes = NAME2CODES.get(name_query, [])
 
     if codes:
         await message.answer(
-            f"Наименование: **{arg[1].strip()}**\nКоды: {', '.join(codes)}",
+            f"Наименование: **{parts[1].strip()}**\nКоды: {', '.join(codes)}",
             parse_mode="Markdown",
         )
     else:
         await message.answer("Коды для такого наименования не найдены.")
 
 
-# --------- ЕДИНСТВЕННАЯ КОРУТИНА ДЛЯ server.py ---------
+# ---------- ЕДИНСТВЕННАЯ КОРУТИНА ДЛЯ server.py ----------
 async def main() -> None:
     """
     Эту функцию импортирует server.py:  from bot import main as run_bot
     и запускает в on_startup (фоновой задачей).
     """
     load_mapping()
+
     bot = Bot(TOKEN, parse_mode="HTML")
+
+    # ВАЖНО: снимаем любой вебхук и чистим отложенные апдейты,
+    # чтобы polling был единственным источником getUpdates.
+    await bot.delete_webhook(drop_pending_updates=True)
+
     dp = Dispatcher()
     dp.include_router(router)
 
