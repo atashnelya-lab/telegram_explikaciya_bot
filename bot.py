@@ -1,171 +1,120 @@
+# bot.py — aiogram v3, polling, одна корутина main() для server.py
 
 import os
 import json
-import csv
+import logging
+from pathlib import Path
+from typing import Dict, List
+
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import Message
 from aiogram.filters import Command
-import asyncio
-from typing import Dict, List, Tuple
 
+# --------- ЛОГИ ---------
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("telegram_explikaciya_bot")
+
+# --------- НАСТРОЙКИ ---------
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
-    raise RuntimeError("Please set BOT_TOKEN environment variable")
+    raise RuntimeError("Environment variable BOT_TOKEN is not set")
 
-DATA_JSON = "explikaciya_mapping.json"
-DATA_CSV  = "explikaciya_codes_names.csv"
+DATA_FILE = Path(__file__).parent / "explikaciya_mapping.json"
 
-# In-memory indexes
+# Словари, которые загрузим из json
 CODE2NAME: Dict[str, str] = {}
 NAME2CODES: Dict[str, List[str]] = {}
 
-def _norm_code(s: str) -> str:
-    return (s or "").strip().upper().replace(" ", "")
-
-def _norm_name(s: str) -> str:
-    return " ".join((s or "").strip().lower().split())
-
-def load_mapping() -> Tuple[int, int]:
+# --------- ЗАГРУЗКА ДАННЫХ ---------
+def load_mapping() -> None:
     global CODE2NAME, NAME2CODES
-    CODE2NAME, NAME2CODES = {}, {}
+    if not DATA_FILE.exists():
+        log.error("Файл с данными не найден: %s", DATA_FILE)
+        CODE2NAME, NAME2CODES = {}, {}
+        return
 
-    def add_pair(code: str, name: str):
-        c = _norm_code(code)
-        if not c or not name:
-            return
-        CODE2NAME[c] = name.strip()
-        nn = _norm_name(name)
-        NAME2CODES.setdefault(nn, [])
-        if c not in NAME2CODES[nn]:
-            NAME2CODES[nn].append(c)
+    with DATA_FILE.open("r", encoding="utf-8") as f:
+        data = json.load(f)
 
-    # Prefer JSON if present and not empty
-    if os.path.exists(DATA_JSON) and os.path.getsize(DATA_JSON) > 2:
-        with open(DATA_JSON, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # Support two popular layouts:
-        if isinstance(data, dict) and "code_to_name" in data and "name_to_codes" in data:
-            for c, n in data["code_to_name"].items():
-                add_pair(c, n)
-        elif isinstance(data, dict):
-            # assume {code: name}
-            for c, n in data.items():
-                add_pair(c, n)
-    # Fallback to CSV
-    elif os.path.exists(DATA_CSV) and os.path.getsize(DATA_CSV) > 2:
-        with open(DATA_CSV, "r", encoding="utf-8", newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                add_pair(row.get("code") or row.get("CODE") or row.get("Code"),
-                         row.get("name") or row.get("NAME") or row.get("Name"))
-    return (len(CODE2NAME), len(NAME2CODES))
+    # ожидаем структуру {"code_to_name": {...}, "name_to_codes": {...}}
+    CODE2NAME = data.get("code_to_name", {}) or {}
+    NAME2CODES = data.get("name_to_codes", {}) or {}
 
-load_mapping()
+    # Нормализация ключей для устойчивого поиска
+    CODE2NAME = {str(k).strip().upper(): str(v) for k, v in CODE2NAME.items()}
+    NAME2CODES = {
+        str(name).strip().lower(): [str(c).strip().upper() for c in codes]
+        for name, codes in NAME2CODES.items()
+    }
 
+    log.info("Загружено: %d кодов, %d наименований", len(CODE2NAME), len(NAME2CODES))
+
+
+# --------- ROUTER ---------
 router = Router()
-dp = Dispatcher()
-dp.include_router(router)
 
-# Per-user pending action: "code" or "name"
-PENDING: Dict[int, str] = {}
-
-HELP = (
-    "Экспликация. Команды:\n"
-    "/bycode <КОД> — наименование по коду\n"
-    "/byname <НАИМЕНОВАНИЕ> — коды по наименованию\n\n"
-    "Можно вводить без аргумента: бот спросит, что ввести.\n"
-    "/reload — перечитать список без перезапуска."
-)
 
 @router.message(Command("start"))
-async def cmd_start(msg: Message):
-    await msg.answer(HELP)
+async def cmd_start(message: Message) -> None:
+    text = (
+        "Экспликация. Команды:\n"
+        "/bycode <КОД> — наименование по коду\n"
+        "/byname <НАИМЕНОВАНИЕ> — коды по наименованию\n\n"
+        "Примеры:\n"
+        "/bycode A0UJA\n"
+        "/byname Реакторное здание"
+    )
+    await message.answer(text)
 
-@router.message(Command("reload"))
-async def cmd_reload(msg: Message):
-    c, n = load_mapping()
-    await msg.answer(f"✅ Список обновлён. {c} кодов, {n} наименований.")
-
-async def handle_bycode_query(msg: Message, code_text: str):
-    code = _norm_code(code_text)
-    if not code:
-        await msg.answer("Введите код, например: A0UJA")
-        return
-    name = CODE2NAME.get(code)
-    if name:
-        await msg.answer(f"Код: {code}\nНаименование: {name}")
-    else:
-        await msg.answer("Ничего не найдено по этому коду.")
-
-async def handle_byname_query(msg: Message, name_text: str):
-    nn = _norm_name(name_text)
-    if not nn:
-        await msg.answer("Введите наименование, например: Реакторное здание")
-        return
-    codes = NAME2CODES.get(nn, [])
-    if codes:
-        codes_str = ", ".join(sorted(codes))
-        original = CODE2NAME.get(codes[0], name_text)
-        await msg.answer(f"Наименование: {original}\nКоды: {codes_str}")
-    else:
-        # попытка мягкого поиска по подстроке
-        nn_parts = nn.split()
-        found = []
-        for k, v in CODE2NAME.items():
-            vv = _norm_name(v)
-            if all(p in vv for p in nn_parts):
-                found.append((k, v))
-        if found:
-            # покажем максимум 20
-            lines = [f"{c} — {n}" for c, n in found[:20]]
-            more = "" if len(found) <= 20 else f"\n…и ещё {len(found)-20}"
-            await msg.answer("Найдено по подстроке:\n" + "\n".join(lines) + more)
-        else:
-            await msg.answer("Ничего не найдено по этому наименованию.")
 
 @router.message(Command("bycode"))
-async def cmd_bycode(msg: Message):
-    parts = (msg.text or "").split(maxsplit=1)
-    if len(parts) == 2:
-        await handle_bycode_query(msg, parts[1])
+async def cmd_bycode(message: Message) -> None:
+    # аргументы команды: всё, что после /bycode
+    arg = (message.text or "").split(maxsplit=1)
+    if len(arg) < 2:
+        await message.answer("Укажи код: например, `/bycode A0UJA`", parse_mode="Markdown")
+        return
+
+    code = arg[1].strip().upper()
+    name = CODE2NAME.get(code)
+    if name:
+        await message.answer(f"Код: **{code}**\nНаименование: {name}", parse_mode="Markdown")
     else:
-        PENDING[msg.from_user.id] = "code"
-        await msg.answer("Введите код (например, A0UJA):")
+        await message.answer("Ничего не найдено по этому коду.")
+
 
 @router.message(Command("byname"))
-async def cmd_byname(msg: Message):
-    parts = (msg.text or "").split(maxsplit=1)
-    if len(parts) == 2:
-        await handle_byname_query(msg, parts[1])
+async def cmd_byname(message: Message) -> None:
+    arg = (message.text or "").split(maxsplit=1)
+    if len(arg) < 2:
+        await message.answer(
+            "Укажи наименование: например, `/byname Реакторное здание`",
+            parse_mode="Markdown",
+        )
+        return
+
+    name_query = arg[1].strip().lower()
+    codes = NAME2CODES.get(name_query, [])
+
+    if codes:
+        await message.answer(
+            f"Наименование: **{arg[1].strip()}**\nКоды: {', '.join(codes)}",
+            parse_mode="Markdown",
+        )
     else:
-        PENDING[msg.from_user.id] = "name"
-        await msg.answer("Введите наименование (например, Реакторное здание):")
+        await message.answer("Коды для такого наименования не найдены.")
 
-@router.message(F.text)
-async def any_text(msg: Message):
-    # обработка ожиданий
-    pending = PENDING.pop(msg.from_user.id, None)
-    if pending == "code":
-        await handle_bycode_query(msg, msg.text or "")
-    elif pending == "name":
-        await handle_byname_query(msg, msg.text or "")
-    else:
-        # подсказка
-        if msg.text and msg.text.strip().startswith("/"):
-            return
-        await msg.answer("Используйте /bycode или /byname. Для справки — /start.")
 
-async def main():
-    bot = Bot(token=TOKEN, parse_mode="HTML")
-    await dp.start_polling(bot)
+# --------- ЕДИНСТВЕННАЯ КОРУТИНА ДЛЯ server.py ---------
+async def main() -> None:
+    """
+    Эту функцию импортирует server.py:  from bot import main as run_bot
+    и запускает в on_startup (фоновой задачей).
+    """
+    load_mapping()
+    bot = Bot(TOKEN, parse_mode="HTML")
+    dp = Dispatcher()
+    dp.include_router(router)
 
-if __name__ == "__main__":
-    asyncio.run(main())
-    # ВНИМАНИЕ: ниже должно существовать dp = Dispatcher() в твоем коде!
-# Ничего из твоих хендлеров менять не нужно.
-
-from aiogram import Bot
-
-async def main():
-    bot = Bot(TOKEN)
+    log.info("Стартуем polling…")
     await dp.start_polling(bot)
