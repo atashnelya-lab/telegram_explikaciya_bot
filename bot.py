@@ -161,3 +161,11 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    # ВНИМАНИЕ: ниже должно существовать dp = Dispatcher() в твоем коде!
+# Ничего из твоих хендлеров менять не нужно.
+
+from aiogram import Bot
+
+async def main():
+    bot = Bot(TOKEN)
+    await dp.start_polling(bot)
